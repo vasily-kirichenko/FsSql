@@ -34,59 +34,72 @@ IntelliFactory at http://intellifactory.com/contact.
     <BuildDependsOn>BuildMagicRestore;$(BuildDependsOn)</BuildDependsOn>
   </PropertyGroup>
 
-  <UsingTask TaskName="BuildMagicDownload" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.v4.0.dll" >
+  <UsingTask TaskName="BuildMagicDownloadAndExtract" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.v4.0.dll" >
     <ParameterGroup>
       <Address ParameterType="System.String" Required="true" />
       <DestinationFile ParameterType="System.String" Required="true" />
     </ParameterGroup>
     <Task>
-      <Code Type="Fragment" Language="cs">
-        <![CDATA[
-          using (var client = new System.Net.WebClient())
-          {
-            Directory.CreateDirectory(Path.GetDirectoryName(DestinationFile));
-            client.DownloadFile(Address, DestinationFile);
-            return true;
-          }
-        ]]>
-      </Code>
-    </Task>
-  </UsingTask>
-
-  <UsingTask TaskName="BuildMagicExtract" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.v4.0.dll" >
-    <ParameterGroup>
-      <ZipFile ParameterType="System.String" Required="true" />
-      <PathInZipFile ParameterType="System.String" Required="true" />
-      <DestinationFile ParameterType="System.String" Required="true" />
-    </ParameterGroup>
-    <Task>
       <Reference Include="WindowsBase" />
+      <Using Namespace="System.IO"/>
+      <Using Namespace="System.IO.Packaging"/>
+      <Using Namespace="System.Net"/>
+      <Using Namespace="System.Threading"/>
       <Code Type="Fragment" Language="cs">
         <![CDATA[
-          using (var pkg = System.IO.Packaging.ZipPackage.Open(ZipFile, FileMode.Open))
-          {
-            var part = pkg.GetParts().First(x => x.Uri.ToString() == PathInZipFile);
-            using (var stream = part.GetStream(FileMode.Open))
+            var dir = Path.GetDirectoryName(DestinationFile);
+            var lockFile = Path.Combine(dir, "BuildMagic.lock");
+            var waits = 0;
+            Directory.CreateDirectory(dir);
+
+            // Wait to acquire file system lock.
+            while (true)
             {
-              Directory.CreateDirectory(Path.GetDirectoryName(DestinationFile));
-              using (var output = File.Open(DestinationFile, FileMode.Create))
-              {
-                stream.CopyTo(output);
-              }
+                try
+                {
+                    using (var file = File.Open(lockFile, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        // Skip if already downloaded.
+                        if (!File.Exists(DestinationFile))
+                        {
+                            var zipFile = Path.GetTempFileName();
+                            using (var client = new WebClient())
+                            {
+                                client.DownloadFile(Address, zipFile);
+                            }
+                            using (var pkg = ZipPackage.Open(zipFile, FileMode.Open))
+                            {
+                                var part = pkg.GetParts().First(x => x.Uri.ToString() == "/tools/NuGet.exe");
+                                using (var stream = part.GetStream(FileMode.Open))
+                                {
+                                    using (var output = File.Open(DestinationFile, FileMode.Create))
+                                    {
+                                        stream.CopyTo(output);
+                                    }
+                                }
+                            }
+                        }
+                        return true;
+                    }
+                }
+                catch (IOException e)
+                {
+                    waits = waits + 1;
+                    if (waits <= 100) {
+                        Thread.Sleep(100);
+                    } else {
+                        this.Log.LogErrorFromException(e);
+                        return false;
+                    }
+                }
             }
-            return true;
-          }
         ]]>
       </Code>
     </Task>
   </UsingTask>
 
   <Target Name="BuildMagicInstallNuget" Condition="!Exists($(BuildMagicNuGetLocation))">
-    <PropertyGroup>
-      <BuildMagicNuGetZip>$(BuildMagicNuGetLocation).zip</BuildMagicNuGetZip>
-    </PropertyGroup>
-    <BuildMagicDownload Address="$(BuildMagicNuGetUrl)" DestinationFile="$(BuildMagicNuGetZip)" />
-    <BuildMagicExtract ZipFile="$(BuildMagicNuGetZip)" PathInZipFile="/tools/NuGet.exe" DestinationFile="$(BuildMagicNuGetLocation)" />
+    <BuildMagicDownloadAndExtract Address="$(BuildMagicNuGetUrl)" DestinationFile="$(BuildMagicNuGetLocation)" />
   </Target>
 
   <Target Name="BuildMagicRestore" Condition="Exists('$(BuildMagicPackagesConfig)')" DependsOnTargets="BuildMagicInstallNuget">
